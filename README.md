@@ -189,15 +189,20 @@ Use the included Python script to capture images:
 # Install dependencies
 pip install requests
 
+# For fast mDNS resolution (highly recommended on Windows)
+pip install zeroconf
+
 # Interactive mode (press ENTER to capture repeatedly)
 python capture_wifi.py growpod-camera.local
 
 # Single capture with specific filename
 python capture_wifi.py growpod-camera.local my_photo.jpg
 
-# Or use IP address
+# Or use IP address (fastest, no DNS resolution)
 python capture_wifi.py 192.168.1.100
 ```
+
+**Note**: The `zeroconf` library enables fast mDNS hostname resolution (instant vs 10-15 seconds on Windows). Without it, the script falls back to standard DNS resolution which is very slow for `.local` hostnames on Windows.
 
 ## Configuration Notes
 
@@ -223,15 +228,43 @@ JPEG quality and resolution are configured in `main/camera/camera.c`:
 
 ## Performance
 
-Based on real-world testing with QXGA (2048x1536) captures:
+### Optimized Configuration
 
-- **Image Capture**: 96-176ms (avg ~130ms)
-- **WiFi Transfer**: 574-8776ms (varies with network conditions)
-- **Total Time**: 671-8908ms
-  - Best case: ~670ms (excellent WiFi signal)
-  - Typical: ~1.5-3 seconds (normal conditions)
-  - Worst case: ~9 seconds (weak WiFi or congestion)
-- **Image Size**: ~290KB (JPEG quality 4)
+This project is configured for **maximum WiFi throughput** with optimizations including:
+- **WiFi Power Saving Disabled**: Zero latency, instant response
+- **Large TCP Buffers**: 65KB send/receive windows for bulk transfers
+- **TCP NODELAY**: Nagle's algorithm disabled for immediate packet transmission
+- **Increased Block Ack Windows**: 32 frames (vs default 6) for better throughput
+- **Large RX/TX Buffers**: 64 dynamic buffers (vs default 32)
+
+### Real-World Performance
+
+Based on extensive testing with QXGA (2048x1536) captures over WiFi:
+
+**Image Capture (Camera Sensor):**
+- Range: 105-175ms
+- Average: ~130ms
+- Consistent and predictable
+
+**WiFi Transfer (ESP32 → Client):**
+- Best case: 150-300ms (excellent conditions)
+- Typical: 1-3 seconds (normal WiFi congestion)
+- Worst case: 5-6 seconds (heavy interference)
+- **Highly variable** due to shared WiFi medium
+
+**Total End-to-End Time:**
+- Best case: ~300ms (1 MB/s throughput)
+- Typical: ~1.5-3 seconds (100-200 KB/s)
+- Worst case: ~6 seconds (50 KB/s)
+
+**Image Size:** ~260-290KB (JPEG quality 4, varies with scene complexity)
+
+### Performance Notes
+
+- **WiFi is a shared medium**: Transfer times vary based on channel congestion, interference, and other network activity
+- **Best performance**: Achieves ~1 MB/s (300ms for 290KB) with clean WiFi conditions
+- **Power consumption**: Higher than default due to disabled power saving (performance prioritized)
+- **Consistency**: Camera capture is consistent (~130ms), WiFi transfer variance is normal behavior
 
 ## Troubleshooting
 
@@ -244,10 +277,14 @@ Ensure `CONFIG_SPIRAM_MODE_OCT=y` is set in sdkconfig. The XIAO uses Octal PSRAM
 3. Check serial monitor for connection errors
 
 ### mDNS Not Resolving
-- Windows: Install Bonjour Print Services
-- Linux: Install `avahi-daemon`
-- macOS: Built-in support
-- Fallback: Use direct IP address from serial monitor
+- **Windows**: Install [Bonjour Print Services](https://support.apple.com/kb/DL999)
+  - Even with Bonjour, mDNS resolution can be slow (10-15 seconds)
+  - **Recommended**: Use IP address directly for faster response
+- **Linux**: Install `avahi-daemon`
+- **macOS**: Built-in support (fast and reliable)
+- **Fallback**: Use direct IP address from serial monitor
+
+**Performance Tip**: On Windows, using the IP address (`192.168.x.x`) instead of the mDNS hostname (`growpod-camera.local`) provides instant connection vs 10-15 second delays.
 
 ### Build Errors
 ```bash

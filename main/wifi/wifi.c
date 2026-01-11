@@ -12,6 +12,8 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "secrets.h"
+#include <string.h>
+#include <stdlib.h>
 
 static const char *TAG = "wifi";
 
@@ -25,6 +27,108 @@ static EventGroupHandle_t s_wifi_event_group;
 
 static int s_retry_num = 0;
 #define MAX_RETRY_ATTEMPTS 5
+
+/**
+ * @brief Scan WiFi channels and report congestion
+ */
+static void scan_wifi_channels(void)
+{
+    ESP_LOGI(TAG, "Scanning WiFi channels for congestion analysis...");
+    
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,
+        .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time.active.min = 100,
+        .scan_time.active.max = 300,
+    };
+    
+    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
+    
+    uint16_t ap_count = 0;
+    esp_wifi_scan_get_ap_num(&ap_count);
+    
+    if (ap_count == 0) {
+        ESP_LOGI(TAG, "No APs found");
+        return;
+    }
+    
+    wifi_ap_record_t *ap_list = malloc(sizeof(wifi_ap_record_t) * ap_count);
+    if (ap_list == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for AP list");
+        return;
+    }
+    
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_count, ap_list));
+    
+    // Count APs per channel
+    int channel_count[14] = {0};  // WiFi channels 1-13 (+ 0 for indexing)
+    
+    for (int i = 0; i < ap_count; i++) {
+        if (ap_list[i].primary >= 1 && ap_list[i].primary <= 13) {
+            channel_count[ap_list[i].primary]++;
+        }
+    }
+    
+    // Log channel congestion
+    ESP_LOGI(TAG, "WiFi Channel Congestion Analysis:");
+    ESP_LOGI(TAG, "  Channel  |  APs  |  Congestion");
+    ESP_LOGI(TAG, "  ---------|-------|-------------");
+    
+    for (int ch = 1; ch <= 13; ch++) {
+        if (channel_count[ch] > 0) {
+            const char* level;
+            if (channel_count[ch] <= 2) level = "Low";
+            else if (channel_count[ch] <= 5) level = "Medium";
+            else level = "High";
+            
+            ESP_LOGI(TAG, "     %2d    |  %2d   |  %s", ch, channel_count[ch], level);
+        }
+    }
+    
+    // Find our AP and report its channel
+    for (int i = 0; i < ap_count; i++) {
+        if (strcmp((char*)ap_list[i].ssid, WIFI_SSID) == 0) {
+            int our_channel = ap_list[i].primary;
+            ESP_LOGI(TAG, "");
+            ESP_LOGI(TAG, "Your AP '%s' is on channel %d with %d other APs", 
+                     WIFI_SSID, our_channel, channel_count[our_channel] - 1);
+            ESP_LOGI(TAG, "  Signal strength: %d dBm", ap_list[i].rssi);
+            
+            // Suggest better channels if current one is congested
+            if (channel_count[our_channel] > 3) {
+                ESP_LOGI(TAG, "  ⚠️  Channel %d is congested!", our_channel);
+                ESP_LOGI(TAG, "  💡 Consider switching your router to a less congested channel:");
+                
+                // Recommend least congested channels (prefer 1, 6, 11 for non-overlapping)
+                int best_channel = 1;
+                int min_count = channel_count[1];
+                
+                // Check channels 6 and 11
+                if (channel_count[6] < min_count) {
+                    min_count = channel_count[6];
+                    best_channel = 6;
+                }
+                if (channel_count[11] < min_count) {
+                    min_count = channel_count[11];
+                    best_channel = 11;
+                }
+                
+                if (best_channel != our_channel) {
+                    ESP_LOGI(TAG, "     Recommended: Channel %d (%d APs)", best_channel, min_count);
+                }
+            } else {
+                ESP_LOGI(TAG, "  ✓ Channel %d looks good!", our_channel);
+            }
+            break;
+        }
+    }
+    
+    free(ap_list);
+    ESP_LOGI(TAG, "");
+}
 
 /**
  * @brief WiFi event handler
@@ -85,6 +189,11 @@ esp_err_t wifi_init_sta(void)
     
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    
+    // Disable power saving for maximum performance and low latency
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_LOGI(TAG, "WiFi power saving disabled for maximum performance");
+    
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "Connecting to WiFi SSID: %s", WIFI_SSID);
@@ -98,6 +207,10 @@ esp_err_t wifi_init_sta(void)
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to WiFi successfully");
+        
+        // Scan and analyze WiFi channel congestion
+        scan_wifi_channels();
+        
         return ESP_OK;
     } else if (bits & WIFI_FAIL_BIT) {
         ESP_LOGE(TAG, "Failed to connect to WiFi");

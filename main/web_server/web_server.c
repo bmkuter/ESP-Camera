@@ -381,6 +381,7 @@ static esp_err_t capture_handler(httpd_req_t *req)
              (capture_time - start_time) / 1000);
     
     // Send image
+    ESP_LOGI(TAG, "Starting image transfer (%d bytes)...", fb->len);
     httpd_resp_set_type(req, "image/jpeg");
     httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
     
@@ -402,16 +403,66 @@ static esp_err_t capture_handler(httpd_req_t *req)
  */
 static esp_err_t status_handler(httpd_req_t *req)
 {
-    const char* json_response = 
+    sensor_t *s = esp_camera_sensor_get();
+    if (s == NULL) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    
+    int width = 0, height = 0;
+    const char* resolution_name = "UNKNOWN";
+    int quality = s->status.quality;
+    int framesize = s->status.framesize;
+    
+    // Use sensor status to determine resolution
+    // Note: Frame buffer dimensions can be unreliable on some cameras
+    switch (s->status.framesize) {
+        case FRAMESIZE_QXGA:   width = 2048; height = 1536; resolution_name = "QXGA"; break;
+        case FRAMESIZE_UXGA:   width = 1600; height = 1200; resolution_name = "UXGA"; break;
+        case FRAMESIZE_SXGA:   width = 1280; height = 1024; resolution_name = "SXGA"; break;
+        case FRAMESIZE_XGA:    width = 1024; height = 768;  resolution_name = "XGA"; break;
+        case FRAMESIZE_SVGA:   width = 800;  height = 600;  resolution_name = "SVGA"; break;
+        case FRAMESIZE_VGA:    width = 640;  height = 480;  resolution_name = "VGA"; break;
+        case FRAMESIZE_HVGA:   width = 480;  height = 320;  resolution_name = "HVGA"; break;
+        case FRAMESIZE_CIF:    width = 400;  height = 296;  resolution_name = "CIF"; break;
+        case FRAMESIZE_QVGA:   width = 320;  height = 240;  resolution_name = "QVGA"; break;
+        default:               width = 0;    height = 0;    resolution_name = "UNKNOWN"; break;
+    }
+    
+    ESP_LOGI(TAG, "Status: sensor.framesize=%d (%s %dx%d), quality=%d",
+             framesize, resolution_name, width, height, quality);
+    
+    // Build JSON response with current camera state including all photographic parameters
+    char json_response[512];
+    snprintf(json_response, sizeof(json_response),
         "{"
         "\"status\":\"ready\","
         "\"camera\":\"OV3660\","
-        "\"resolution\":\"QXGA\","
-        "\"width\":2048,"
-        "\"height\":1536,"
+        "\"resolution\":\"%s\","
+        "\"width\":%d,"
+        "\"height\":%d,"
+        "\"quality\":%d,"
+        "\"framesize\":%d,"
         "\"format\":\"JPEG\","
-        "\"psram\":true"
-        "}";
+        "\"psram\":true,"
+        "\"aec\":%d,"
+        "\"aec_value\":%d,"
+        "\"ae_level\":%d,"
+        "\"gain_ctrl\":%d,"
+        "\"agc_gain\":%d,"
+        "\"brightness\":%d,"
+        "\"contrast\":%d,"
+        "\"saturation\":%d,"
+        "\"sharpness\":%d,"
+        "\"awb\":%d,"
+        "\"hmirror\":%d,"
+        "\"vflip\":%d"
+        "}",
+        resolution_name, width, height, quality, framesize,
+        s->status.aec, s->status.aec_value, s->status.ae_level,
+        s->status.agc, s->status.agc_gain,
+        s->status.brightness, s->status.contrast, s->status.saturation, s->status.sharpness,
+        s->status.awb, s->status.hmirror, s->status.vflip);
     
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json_response, strlen(json_response));
@@ -483,6 +534,74 @@ static esp_err_t control_handler(httpd_req_t *req)
         // Manual Gain Value
         res = s->set_agc_gain(s, value);
         ESP_LOGI(TAG, ">>> Set AGC_GAIN (Manual Gain) to %d, result: %d", value, res);
+    }
+    else if (strcmp(var, "quality") == 0) {
+        // JPEG Quality (0-63, lower is better)
+        res = s->set_quality(s, value);
+        ESP_LOGI(TAG, ">>> Set QUALITY (JPEG Quality) to %d, result: %d", value, res);
+    }
+    else if (strcmp(var, "framesize") == 0) {
+        // Frame size / resolution
+        // Common values: QXGA=10 (2048x1536), UXGA=9 (1600x1200), SXGA=8 (1280x1024), 
+        //                XGA=7 (1024x768), SVGA=6 (800x600), VGA=5 (640x480)
+        ESP_LOGI(TAG, ">>> Setting FRAMESIZE from %d to %d", s->status.framesize, value);
+        res = s->set_framesize(s, (framesize_t)value);
+        ESP_LOGI(TAG, ">>> Set FRAMESIZE (Resolution) to %d, result: %d", value, res);
+        
+        // Discard any buffered frames after resolution change
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (fb) {
+            ESP_LOGI(TAG, ">>> Discarded old frame buffer (%dx%d)", fb->width, fb->height);
+            esp_camera_fb_return(fb);
+        }
+        // Get a fresh frame to verify new resolution
+        fb = esp_camera_fb_get();
+        if (fb) {
+            ESP_LOGI(TAG, ">>> New frame buffer captured (%dx%d)", fb->width, fb->height);
+            esp_camera_fb_return(fb);
+        } else {
+            ESP_LOGW(TAG, ">>> Failed to capture verification frame");
+        }
+    }
+    else if (strcmp(var, "brightness") == 0) {
+        // Brightness (-2 to +2)
+        if (s->set_brightness) {
+            res = s->set_brightness(s, value);
+            ESP_LOGI(TAG, ">>> Set BRIGHTNESS to %d, result: %d", value, res);
+        } else {
+            ESP_LOGW(TAG, ">>> BRIGHTNESS not supported by this camera");
+            res = -1;
+        }
+    }
+    else if (strcmp(var, "contrast") == 0) {
+        // Contrast (-2 to +2)
+        if (s->set_contrast) {
+            res = s->set_contrast(s, value);
+            ESP_LOGI(TAG, ">>> Set CONTRAST to %d, result: %d", value, res);
+        } else {
+            ESP_LOGW(TAG, ">>> CONTRAST not supported by this camera");
+            res = -1;
+        }
+    }
+    else if (strcmp(var, "saturation") == 0) {
+        // Saturation (-2 to +2)
+        if (s->set_saturation) {
+            res = s->set_saturation(s, value);
+            ESP_LOGI(TAG, ">>> Set SATURATION to %d, result: %d", value, res);
+        } else {
+            ESP_LOGW(TAG, ">>> SATURATION not supported by this camera");
+            res = -1;
+        }
+    }
+    else if (strcmp(var, "sharpness") == 0) {
+        // Sharpness (-2 to +2)
+        if (s->set_sharpness) {
+            res = s->set_sharpness(s, value);
+            ESP_LOGI(TAG, ">>> Set SHARPNESS to %d, result: %d", value, res);
+        } else {
+            ESP_LOGW(TAG, ">>> SHARPNESS not supported by this camera");
+            res = -1;
+        }
     }
     else {
         ESP_LOGW(TAG, "Unknown control variable: %s", var);
