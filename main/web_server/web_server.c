@@ -5,6 +5,7 @@
 
 #include "web_server/web_server.h"
 #include "camera/camera.h"
+#include "settings/settings.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_camera.h"
@@ -609,8 +610,18 @@ static esp_err_t control_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     
-    // Send response
+    // If setting was successfully applied, save to NVS
     if (res == 0) {
+        camera_settings_t settings;
+        if (settings_read_from_camera(&settings) == ESP_OK) {
+            esp_err_t save_err = settings_save(&settings);
+            if (save_err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to save settings to NVS: %s", esp_err_to_name(save_err));
+            } else {
+                ESP_LOGI(TAG, "Settings saved to NVS");
+            }
+        }
+        
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, "OK", 2);
         return ESP_OK;

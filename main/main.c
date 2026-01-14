@@ -14,6 +14,7 @@
 #include "camera/camera.h"
 #include "wifi/wifi.h"
 #include "web_server/web_server.h"
+#include "settings/settings.h"
 
 static const char *TAG = "main";
 
@@ -21,13 +22,12 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "GrowPod ESP32-S3 Camera starting...");
     
-    // Initialize NVS (required for WiFi)
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    // Initialize NVS (required for WiFi and settings)
+    ESP_LOGI(TAG, "Initializing NVS...");
+    if (settings_init() != ESP_OK) {
+        ESP_LOGE(TAG, "NVS initialization failed!");
+        return;
     }
-    ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized");
     
     // Check PSRAM
@@ -45,6 +45,21 @@ void app_main(void)
         return;
     }
     ESP_LOGI(TAG, "Camera initialized successfully");
+    
+    // Load and apply saved settings
+    ESP_LOGI(TAG, "Loading camera settings...");
+    camera_settings_t settings;
+    esp_err_t err = settings_load(&settings);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Applying saved settings to camera");
+        settings_apply_to_camera(&settings);
+    } else {
+        ESP_LOGI(TAG, "No saved settings found, using defaults");
+        settings_get_defaults(&settings);
+        settings_apply_to_camera(&settings);
+        // Save the defaults so they're available next time
+        settings_save(&settings);
+    }
     
     // Initialize WiFi
     ESP_LOGI(TAG, "Initializing WiFi...");
